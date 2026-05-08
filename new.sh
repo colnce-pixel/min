@@ -10,7 +10,7 @@ ALLOW_MINING="${ALLOW_MINING:-1}"
 [ "$ALLOW_MINING" = "1" ] || exit 0
 
 HOSTNAME_SAFE="$(hostname | tr -cd '[:alnum:]._\-')"
-INTERVAL=60  # Увеличил до 60с, чтобы не спамить API и дать майнерам время на старт
+INTERVAL=1  # Увеличил до 60с, чтобы не спамить API и дать майнерам время на старт
 
 # TELEGRAM (Твои данные)
 TG_TOKEN="7707664730:AAFn_w7oN_LvELjXhh8RRAzq7CO0acaHy1M"
