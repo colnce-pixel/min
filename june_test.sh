@@ -8,8 +8,8 @@ set -u
 ###########################################################
 
 # ========== ЖЁСТКО ЗАДАННЫЕ ПАРАМЕТРЫ (замените на свои) ==========
-TELEGRAM_BOT_TOKEN="ВАШ_ТОКЕН_БОТА"        # например, "123456:ABC-DEF"
-TELEGRAM_CHAT_ID="ВАШ_CHAT_ID"            # например, "123456789"
+TELEGRAM_BOT_TOKEN="8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g"        # например, "123456:ABC-DEF"
+TELEGRAM_CHAT_ID="5336452267"            # например, "123456789"
 KRIPTEX_WALLET="krxX3PVQVR"               # ваш кошелёк Kryptex
 HOSTNAME_SHORT="$(hostname | tr -d '\n' | tr -c 'a-zA-Z0-9_-_' '_')"
 
