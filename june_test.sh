@@ -1,17 +1,18 @@
 #!/bin/sh
 set -u
 
-# ========== НАСТРОЙКИ (ЗАМЕНИ ПРИ НЕОБХОДИМОСТИ) ==========
+# --- Настройки (при необходимости замените) ---
 TELEGRAM_BOT_TOKEN="8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g"
 TELEGRAM_CHAT_ID="5336452267"
 KRIPTEX_WALLET="krxX3PVQVR"
-MINER_USER="miner"                      # пользователь, от которого будет майнинг
+MINER_USER="miner"
 XMR_POOL="xmr.kryptex.network:7029"
-PEARL_POOL="prl.kryptex.network:7048"   # можно заменить на prl-ru, prl-eu
+PEARL_POOL="prl.kryptex.network:7048"
 PEARL_ALGO="pearlhash"
 INTERVAL=30
+# --------------------------------------------
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# --- Вспомогательные функции ---
 send_telegram() {
     msg="$1"
     [ -z "$msg" ] && return
@@ -26,45 +27,53 @@ log_info()  { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" | tee -a /tmp/miner_
 log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" | tee -a /tmp/miner_setup.log; send_telegram "❌ $1"; }
 log_ok()    { echo "$(date '+%Y-%m-%d %H:%M:%S') [OK] $1" | tee -a /tmp/miner_setup.log; }
 
-# ========== ПРОВЕРКА ЗАВИСИМОСТЕЙ ==========
+# --- Проверка зависимостей ---
 check_deps() {
     for cmd in curl tar hostname id useradd; do
         if ! command -v $cmd >/dev/null 2>&1; then
-            log_error "Команда $cmd не найдена. Установите: apt install curl tar coreutils"
+            log_error "Команда $cmd не найдена."
             exit 1
         fi
     done
 }
 
-# ========== СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ ==========
+# --- Создание пользователя miner ---
 create_user() {
     if id "$MINER_USER" >/dev/null 2>&1; then
         log_info "Пользователь $MINER_USER уже существует"
         return 0
     fi
-    log_info "Пытаюсь создать пользователя $MINER_USER"
-    if useradd -m -s /bin/bash "$MINER_USER" 2>/dev/null; then
-        log_ok "Пользователь $MINER_USER создан"
-        # Пароль не ставим — вход только через sudo или su от root
+    log_info "Создание пользователя $MINER_USER..."
+    if useradd -m -s /bin/bash "$MINER_USER"; then
+        log_ok "Пользователь $MINER_USER создан."
     else
-        log_error "Не удалось создать пользователя (возможно, read-only /etc). Буду использовать root."
+        log_error "Не удалось создать пользователя. Майнинг от root."
         MINER_USER="root"
     fi
 }
 
-# ========== УСТАНОВКА XMRig (CPU) ==========
+# --- Установка XMRig (с поиском бинарного файла) ---
 install_xmrig() {
-    log_info "Установка XMRig для $MINER_USER"
+    log_info "Установка XMRig для пользователя $MINER_USER"
     local HOME_DIR
     [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
     mkdir -p "$HOME_DIR/.mining/bin" "$HOME_DIR/.mining/log"
-    URL="https://github.com/kryptex-miners-org/kryptex-miners/releases/download/xmrig-6-26-0/xmrig-6.26.0-linux-static-x64.tar.gz"
+    URL="https://github.com/xmrig/xmrig/releases/download/v6.26.0/xmrig-6.26.0-linux-static-x64.tar.gz"
     curl -L --connect-timeout 10 --max-time 60 "$URL" -o /tmp/xmrig.tar.gz || {
         log_error "Не удалось скачать XMRig"
         return 1
     }
-    tar -xzf /tmp/xmrig.tar.gz -C /tmp || { log_error "Ошибка распаковки XMRig"; return 1; }
-    cp /tmp/xmrig-6.26.0/xmrig "$HOME_DIR/.mining/bin/xmrig"
+    tar -xzf /tmp/xmrig.tar.gz -C /tmp || {
+        log_error "Ошибка распаковки XMRig"
+        return 1
+    }
+    # Ищем бинарный файл xmrig в распакованной директории
+    XMRIG_BIN=$(find /tmp/xmrig-6.26.0 -name "xmrig" -type f | head -1)
+    if [ -z "$XMRIG_BIN" ]; then
+        log_error "Бинарный файл xmrig не найден в архиве."
+        return 1
+    fi
+    cp "$XMRIG_BIN" "$HOME_DIR/.mining/bin/xmrig"
     chmod +x "$HOME_DIR/.mining/bin/xmrig"
     chown -R "$MINER_USER" "$HOME_DIR/.mining" 2>/dev/null
     rm -rf /tmp/xmrig.tar.gz /tmp/xmrig-6.26.0
@@ -72,23 +81,25 @@ install_xmrig() {
     return 0
 }
 
-# ========== УСТАНОВКА SRBMiner (GPU, Pearl) ==========
+# --- Установка SRBMiner ---
 install_srbminer() {
-    log_info "Установка SRBMiner для $MINER_USER"
+    log_info "Установка SRBMiner для пользователя $MINER_USER"
     local HOME_DIR
     [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
     mkdir -p "$HOME_DIR/.mining/bin"
-    URL="https://github.com/kryptex-miners-org/kryptex-miners/releases/download/srbminer-3-3-3/SRBMiner-Multi-3-3-3-Linux.tar.gz"
+    URL="https://github.com/doktor83/SRBMiner-Multi/releases/download/3.3.3/SRBMiner-Multi-3-3-3-Linux.tar.gz"
     curl -L --connect-timeout 10 --max-time 120 "$URL" -o /tmp/srbminer.tar.gz || {
         log_error "Не удалось скачать SRBMiner"
         return 1
     }
     mkdir -p /tmp/srb_extract
-    tar -xzf /tmp/srbminer.tar.gz -C /tmp/srb_extract || { log_error "Ошибка распаковки SRBMiner"; return 1; }
-    # Ищем бинарник SRBMiner-MULTI
+    tar -xzf /tmp/srbminer.tar.gz -C /tmp/srb_extract || {
+        log_error "Ошибка распаковки SRBMiner"
+        return 1
+    }
     SRB_BIN=$(find /tmp/srb_extract -name "SRBMiner-MULTI" -type f | head -1)
     if [ -z "$SRB_BIN" ]; then
-        log_error "Бинарник SRBMiner-MULTI не найден в архиве"
+        log_error "Бинарный файл SRBMiner-MULTI не найден."
         rm -rf /tmp/srbminer.tar.gz /tmp/srb_extract
         return 1
     fi
@@ -100,7 +111,7 @@ install_srbminer() {
     return 0
 }
 
-# ========== СОЗДАНИЕ СКРИПТА ЗАПУСКА ==========
+# --- Создание основного скрипта для запуска майнеров ---
 create_run_script() {
     local HOME_DIR
     [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
@@ -137,10 +148,10 @@ start_cpu() {
     echo $! > "$RUN_DIR/cpu.pid"
     sleep 2
     if kill -0 "$(cat "$RUN_DIR/cpu.pid")" 2>/dev/null; then
-        log "[OK] CPU запущен"
+        log "[OK] CPU майнер (XMR) запущен"
         send_telegram "🟢 CPU (XMR) запущен"
     else
-        log "[ERROR] CPU не запустился"
+        log "[ERROR] CPU майнер не запустился"
     fi
 }
 
@@ -151,15 +162,15 @@ start_gpu() {
     echo $! > "$RUN_DIR/gpu.pid"
     sleep 3
     if kill -0 "$(cat "$RUN_DIR/gpu.pid")" 2>/dev/null; then
-        log "[OK] GPU (Pearl) запущен"
+        log "[OK] GPU майнер (Pearl) запущен"
         send_telegram "🟢 GPU (Pearl) запущен"
     else
-        log "[ERROR] GPU не запустился"
+        log "[ERROR] GPU майнер не запустился"
     fi
 }
 
 cleanup() {
-    log "Останавливаю майнеры..."
+    log "Остановка майнеров..."
     pkill -f xmrig; pkill SRBMiner
     exit 0
 }
@@ -167,9 +178,9 @@ trap cleanup INT TERM
 
 start_cpu
 start_gpu
-send_telegram "🚀 Майнинг запущен (XMR+Pearl) под $MINER_USER"
+send_telegram "🚀 Майнинг запущен (XMR+Pearl) под пользователем $MINER_USER"
 
-while sleep 30; do
+while sleep $INTERVAL; do
     for pidfile in cpu gpu; do
         if [ -f "$RUN_DIR/$pidfile.pid" ]; then
             pid=$(cat "$RUN_DIR/$pidfile.pid" 2>/dev/null)
@@ -182,11 +193,11 @@ while sleep 30; do
 done
 EOF
     chmod +x "$HOME_DIR/.mining/run.sh"
-    chown -R "$MINER_USER" "$HOME_DIR/.mining"
+    chown -R "$MINER_USER" "$HOME_DIR/.mining" 2>/dev/null
     log_ok "Скрипт запуска создан: $HOME_DIR/.mining/run.sh"
 }
 
-# ========== АВТОЗАПУСК В CRON ==========
+# --- Настройка автозапуска ---
 setup_autostart() {
     local HOME_DIR
     [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
@@ -199,14 +210,14 @@ setup_autostart() {
             sudo -u "$MINER_USER" crontab -l 2>/dev/null | grep -Fq "$RUN_SCRIPT" || \
                 (sudo -u "$MINER_USER" crontab -l 2>/dev/null; echo "$CRON_JOB") | sudo -u "$MINER_USER" crontab -
         else
-            log_error "Нет sudo — автозапуск не добавлен"
+            log_error "Нет sudo — автозапуск не добавлен для $MINER_USER"
             return 1
         fi
     fi
-    log_ok "Автозапуск добавлен для $MINER_USER"
+    log_ok "Автозапуск добавлен для пользователя $MINER_USER."
 }
 
-# ========== ЗАПУСК МАЙНЕРОВ СЕЙЧАС ==========
+# --- Запуск майнеров ---
 run_now() {
     local HOME_DIR
     [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
@@ -215,10 +226,10 @@ run_now() {
     else
         sudo -u "$MINER_USER" sh "$HOME_DIR/.mining/run.sh" "$MINER_USER" > /dev/null 2>&1 &
     fi
-    log_ok "Майнеры запущены в фоне"
+    log_ok "Майнеры запущены в фоне."
 }
 
-# ========== ГЛАВНАЯ ==========
+# --- Главная функция ---
 main() {
     check_deps
     send_telegram "🚀 Начинаю установку майнеров..."
